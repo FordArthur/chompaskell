@@ -20,6 +20,26 @@
   (major1) == 4 && (major2) <  17 || \
   (major1) == 4 && (major2) == 17 && (minor) <= 2)
 #endif /* MIN_VERSION_base */
+/* package lens-5.3.2 */
+#ifndef VERSION_lens
+#define VERSION_lens "5.3.2"
+#endif /* VERSION_lens */
+#ifndef MIN_VERSION_lens
+#define MIN_VERSION_lens(major1,major2,minor) (\
+  (major1) <  5 || \
+  (major1) == 5 && (major2) <  3 || \
+  (major1) == 5 && (major2) == 3 && (minor) <= 2)
+#endif /* MIN_VERSION_lens */
+/* package mtl-2.2.2 */
+#ifndef VERSION_mtl
+#define VERSION_mtl "2.2.2"
+#endif /* VERSION_mtl */
+#ifndef MIN_VERSION_mtl
+#define MIN_VERSION_mtl(major1,major2,minor) (\
+  (major1) <  2 || \
+  (major1) == 2 && (major2) <  2 || \
+  (major1) == 2 && (major2) == 2 && (minor) <= 2)
+#endif /* MIN_VERSION_mtl */
 /* package parsec-3.1.16.1 */
 #ifndef VERSION_parsec
 #define VERSION_parsec "3.1.16.1"

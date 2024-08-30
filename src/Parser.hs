@@ -8,10 +8,12 @@ import Text.Parsec.Pos
 import qualified Data.HashMap.Strict as M
 
 data TopLevel =
-    Implementation { funcName         :: Node                     , arguments       :: [Node] , body :: [Node]     }
-  | Declaration    { declName         :: Node                     , declType        :: Node                        }
-  | Instance       { instancing       :: Node , instanced :: Node , implementations :: M.HashMap String [TopLevel] }
-  | Class          { className        :: Node                     , declarations    :: M.HashMap String [TopLevel] }
+    VarBind        { varName          :: Node , varBind      :: Node                                                                         }
+  | Implementation { funcName         :: Node , arguments    :: [Node]                      , body            :: [Node]                      }
+  | Declaration    { declName         :: Node , declType     :: Node                                                                         }
+  | Data           { typeName         :: Node , typeArgs     :: [Node]                      , constructors    :: [Node]                      }
+  | Instance       { instancing       :: Node , instanced    :: Node                        , implementations :: M.HashMap String [TopLevel] }
+  | Class          { className        :: Node , declarations :: M.HashMap String [TopLevel]                                                  }
   | Infix
 
 data AtomType = Identifier | TypeK | Operator | Int | Real' | EndOfFile
@@ -24,7 +26,7 @@ data Node =
   | VarType        { constraintsNodes :: [Node]               , absName   :: Node                             }
   | ConcType       { concName         :: Node                 , consArgs  :: [Node]                           } 
   | TypeAssertion  { node             :: Node                 , choritype :: Node                             }
-  | VarBind        { varname          :: Node                 , bind      :: Node                             }
+  | LocalBind      { locName          :: Node                 , localBind :: Node                             }
     deriving (Eq)
 
 instance Show Node where
@@ -35,10 +37,16 @@ instance Show Node where
   show (VarType c n)        = show n ++ " ∈ " ++ show c
   show (ConcType n a)       = show n ++ (foldl1 (\s s' -> s ++ ' ' : s') . map show $ a)
   show (TypeAssertion n t)  = show n ++ " :: " ++ show t
-  show (VarBind v b)        = "let " ++ show v ++ " = " ++ show b
+  show (LocalBind v b)        = "let " ++ show v ++ " = " ++ show b
 
-data Error = Err { errMsg :: String, errPos :: SourcePos }
-  deriving (Show)
+instance Show TopLevel where
+  show (VarBind n b)          = show n ++ " := " ++ show b
+  show (Implementation f a b) = show f ++ ' ' : show a ++ " = " ++ show b
+  show (Declaration f t)      = show f ++ " :: " ++ show t
+  show (Data n a c)           = show n ++ show a ++ " with constructors " ++ show c
+  show (Instance i c m)       = show i ++ " for " ++ show c ++ " where " ++ show m
+  show (Class c d)            = show c ++ " where " ++ show d
+  show Infix                  = ""
 
 type Precedence = Int
 type ParserState = (SourcePos, M.HashMap String Precedence)
@@ -111,18 +119,22 @@ parseBinaryExpression = do
                                                                                 else BinaryExpr (insertNode opPrec prec op lexpr' expr) op' rexpr'
     insertNode _ _ _ _ _ = undefined
 
-parseBind :: (Monad m) => ParsecT String ParserState m Node
-parseBind = do
+parseLocalBind :: (Monad m) => ParsecT String ParserState m Node
+parseLocalBind = do
   _ <- string "let"
   spaces
   bindedName <- parseIdentifier
   spaces
   _ <- char '='
   spaces
-  VarBind bindedName <$> parseBinaryExpression
+  _ <- char ';'
+  LocalBind bindedName <$> parseBinaryExpression
 
 parseValueExpression :: (Monad m) => ParsecT String ParserState m Node
-parseValueExpression = parseBind <|> parseBinaryExpression
+parseValueExpression = parseLocalBind <|> parseBinaryExpression
+
+parseVarBind :: (Monad m) => ParsecT String ParserState m TopLevel
+parseVarBind = (\(LocalBind n b) -> VarBind n b) <$> parseLocalBind 
 
 parseImplementation :: (Monad m) => ParsecT String ParserState m TopLevel
 parseImplementation = do
@@ -133,11 +145,14 @@ parseImplementation = do
   _ <- char ';'
   return $ Implementation fName args bodyL
 
-parseType :: (Monad m) => M.HashMap String [Node] -> ParsecT String ParserState m Node
-parseType constraints = uncurry VarType . ((flip (M.lookupDefault []) constraints . name) &&& id) <$> parseIdentifier <|> do
+parseConc :: (Monad m) => M.HashMap String [Node] -> ParsecT String ParserState m Node
+parseConc constraints = do 
   typeConstructor <- parseTypeK
   constructorArgs <- many $ parseIdentifier <|> between (char '(') (char ')') (parseType constraints)
   return $ ConcType typeConstructor constructorArgs
+
+parseType :: (Monad m) => M.HashMap String [Node] -> ParsecT String ParserState m Node
+parseType constraints = uncurry VarType . ((flip (M.findWithDefault []) constraints . name) &&& id) <$> parseIdentifier <|> parseConc constraints
 
 parseConstraints :: (Monad m) => ParsecT String ParserState m (M.HashMap String [Node])
 parseConstraints = between (char '(') (char ')' >> spaces >> string "=>") $ parseConstraint `chainl1` (char ',' >> return (M.unionWith (++)))
@@ -161,6 +176,17 @@ parseDeclaration = do
   declFuncName <- parseIdentifier
   spaces
   Declaration declFuncName <$> parseTypeExpression
+
+parseData :: (Monad m) => ParsecT String ParserState m TopLevel
+parseData = do
+  _ <- string "data"
+  spaces
+  dataName <- parseIdentifier
+  spaces
+  dataArgs <- many (parseIdentifier <* spaces)
+  _ <- char '='
+  spaces
+  Data dataName dataArgs <$> parseConc M.empty `sepBy` char '|'
 
 parseInstance :: (Monad m) => ParsecT String ParserState m TopLevel
 parseInstance = do
@@ -196,8 +222,8 @@ parseInfix = do
   updateState $ second $ M.insert (name op) ((read :: String -> Int) prec)
   return Infix
 
-parseChoriLang :: (Monad m) => ParsecT String ParserState m TopLevel
-parseChoriLang = parseImplementation <|> parseDeclaration <|> parseInstance <|> parseClass <|> parseInfix
+parseChoriLang :: (Monad m) => ParsecT String ParserState m [TopLevel]
+parseChoriLang = (parseImplementation <|> parseDeclaration <|> parseData <|> parseDeclaration <|> parseInstance <|> parseClass <|> parseInfix) `sepBy` spaces
 
-parser :: (Monad m) => String -> m (Either ParseError Node)
-parser = runParserT parseBinaryExpression (initialPos "CommandLine", M.empty) "CommandLine"
+parser :: (Monad m) => String -> m (Either ParseError [TopLevel])
+parser = runParserT parseChoriLang (initialPos "CommandLine", M.empty) "CommandLine"
