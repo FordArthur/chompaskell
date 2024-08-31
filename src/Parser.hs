@@ -1,32 +1,31 @@
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
 module Parser where
 
-import Control.Arrow
 import Data.Functor ((<&>))
+import Control.Arrow
 import Text.Parsec
 import Text.Parsec.Pos
-import qualified Data.HashMap.Strict as M
+import qualified Data.HashMap.Strict as H
 
 data TopLevel =
-    VarBind        { varName          :: Node , varBind      :: Node                                                                         }
-  | Implementation { funcName         :: Node , arguments    :: [Node]                      , body            :: [Node]                      }
-  | Declaration    { declName         :: Node , declType     :: Node                                                                         }
-  | Data           { typeName         :: Node , typeArgs     :: [Node]                      , constructors    :: [Node]                      }
-  | Instance       { instancing       :: Node , instanced    :: Node                        , implementations :: M.HashMap String [TopLevel] }
-  | Class          { className        :: Node , declarations :: M.HashMap String [TopLevel]                                                  }
+    VarBind        { varName          :: Node, varBind      :: Node                                                         }
+  | Implementation { funcName         :: Node, arguments    :: [Node], body            :: [Node]                            }
+  | Declaration    { declName         :: Node, constraintsD    :: H.HashMap String [Node], declType     :: Node   }
+  | Data           { typeName         :: Node, typeArgs     :: [Node], constructors    :: [Node]                            }
+  | Instance       { instancing       :: Node, instanced    :: Node  , implementations :: H.HashMap String [TopLevel]       }
+  | Class          { className        :: Node, declarations :: H.HashMap String [TopLevel]                                  }
   | Infix
 
 data AtomType = Identifier | TypeK | Operator | Int | Real' | EndOfFile
   deriving (Eq, Show)
 
 data Node =
-    Atom           { name             :: String               , atomType  :: AtomType, pos       :: SourcePos }
-  | Expression     { expression       :: [Node]                                                               }
-  | BinaryExpr     { leftExpr         :: Node                 , oper      :: Node,     rightExpr :: Node      }
-  | VarType        { constraintsNodes :: [Node]               , absName   :: Node                             }
-  | ConcType       { concName         :: Node                 , consArgs  :: [Node]                           } 
-  | TypeAssertion  { node             :: Node                 , choritype :: Node                             }
-  | LocalBind      { locName          :: Node                 , localBind :: Node                             }
+    Atom           { name       :: String, atomType    :: AtomType                         , pos         :: SourcePos }
+  | Expression     { expression :: [Node]                                                                             }
+  | BinaryExpr     { leftExpr   :: Node  , oper        :: Node                             , rightExpr   :: Node      }
+  | ConcType       { concName   :: Node  , consArgs    :: [Node]                                                      }
+  | TypeAssertion  { node       :: Node  , constraints :: H.HashMap String [Node], choritype :: Node        }
+  | LocalBind      { locName    :: Node  , localBind   :: Node                                                        }
     deriving (Eq)
 
 instance Show Node where
@@ -34,22 +33,21 @@ instance Show Node where
   show (Expression [])      = undefined
   show (Expression (e:es))  = foldl (\s n -> s ++ ' ' : show n) (show e) es
   show (BinaryExpr le o re) = show o ++ " (" ++ show le ++ ") (" ++ show re ++ ")"
-  show (VarType c n)        = show n ++ " ∈ " ++ show c
   show (ConcType n a)       = show n ++ (foldl1 (\s s' -> s ++ ' ' : s') . map show $ a)
-  show (TypeAssertion n t)  = show n ++ " :: " ++ show t
+  show (TypeAssertion n t c)  = show n ++ " :: " ++ show c ++ " => "++ show t
   show (LocalBind v b)        = "let " ++ show v ++ " = " ++ show b
 
 instance Show TopLevel where
   show (VarBind n b)          = show n ++ " := " ++ show b
   show (Implementation f a b) = show f ++ ' ' : show a ++ " = " ++ show b
-  show (Declaration f t)      = show f ++ " :: " ++ show t
+  show (Declaration f t c)    = show f ++ " :: " ++ show c ++ " => " ++ show t
   show (Data n a c)           = show n ++ show a ++ " with constructors " ++ show c
   show (Instance i c m)       = show i ++ " for " ++ show c ++ " where " ++ show m
   show (Class c d)            = show c ++ " where " ++ show d
   show Infix                  = ""
 
 type Precedence = Int
-type ParserState = (SourcePos, M.HashMap String Precedence)
+type ParserState = (SourcePos, H.HashMap String Precedence)
 
 atomWithName :: AtomType -> SourcePos -> String -> Node
 atomWithName t s n = Atom n t s
@@ -108,12 +106,12 @@ parseBinaryExpression = do
   }  <|> return return
   mkRest expr
   where
-    addNode :: (Monad m) => M.HashMap String Int -> Node -> Node -> Node -> m Node
-    addNode prec op  expr' expr= return $ insertNode (M.findWithDefault 5 (name op) prec) prec op expr' expr
+    addNode :: (Monad m) => H.HashMap String Int -> Node -> Node -> Node -> m Node
+    addNode prec op  expr' expr= return $ insertNode (H.findWithDefault 5 (name op) prec) prec op expr' expr
 
-    insertNode :: Int -> M.HashMap String Int -> Node -> Node -> Node -> Node
+    insertNode :: Int -> H.HashMap String Int -> Node -> Node -> Node -> Node
     insertNode _ _ op expr'@(Expression _) expr                         = BinaryExpr expr op expr'
-    insertNode opPrec prec op expr'@(BinaryExpr lexpr' op' rexpr') expr = let opPrec' = M.findWithDefault 5 (name op') prec
+    insertNode opPrec prec op expr'@(BinaryExpr lexpr' op' rexpr') expr = let opPrec' = H.findWithDefault 5 (name op') prec
                                                                             in if opPrec' > opPrec
                                                                                 then BinaryExpr expr op expr'
                                                                                 else BinaryExpr (insertNode opPrec prec op lexpr' expr) op' rexpr'
@@ -134,7 +132,7 @@ parseValueExpression :: (Monad m) => ParsecT String ParserState m Node
 parseValueExpression = parseLocalBind <|> parseBinaryExpression
 
 parseVarBind :: (Monad m) => ParsecT String ParserState m TopLevel
-parseVarBind = (\(LocalBind n b) -> VarBind n b) <$> parseLocalBind 
+parseVarBind = (\(LocalBind n b) -> VarBind n b) <$> parseLocalBind
 
 parseImplementation :: (Monad m) => ParsecT String ParserState m TopLevel
 parseImplementation = do
@@ -145,37 +143,35 @@ parseImplementation = do
   _ <- char ';'
   return $ Implementation fName args bodyL
 
-parseConc :: (Monad m) => M.HashMap String [Node] -> ParsecT String ParserState m Node
-parseConc constraints = do 
+parseConc :: (Monad m) => ParsecT String ParserState m Node
+parseConc = do
   typeConstructor <- parseTypeK
-  constructorArgs <- many $ parseIdentifier <|> between (char '(') (char ')') (parseType constraints)
+  constructorArgs <- many $ parseIdentifier <|> between (char '(') (char ')') parseType
   return $ ConcType typeConstructor constructorArgs
 
-parseType :: (Monad m) => M.HashMap String [Node] -> ParsecT String ParserState m Node
-parseType constraints = uncurry VarType . ((flip (M.findWithDefault []) constraints . name) &&& id) <$> parseIdentifier <|> parseConc constraints
+parseType :: (Monad m) => ParsecT String ParserState m Node
+parseType = parseIdentifier <|> parseConc
 
-parseConstraints :: (Monad m) => ParsecT String ParserState m (M.HashMap String [Node])
-parseConstraints = between (char '(') (char ')' >> spaces >> string "=>") $ parseConstraint `chainl1` (char ',' >> return (M.unionWith (++)))
+parseConstraints :: (Monad m) => ParsecT String ParserState m (H.HashMap String [Node])
+parseConstraints = between (char '(') (char ')' >> spaces >> string "=>") $ parseConstraint `chainl1` (char ',' >> return (H.unionWith (++)))
   where
   parseConstraint = do {
-   cnstraint <- parseTypeK;
-    boundedVar <- parseIdentifier;
-    return $ M.singleton (name cnstraint) [boundedVar]
+    cnstraint <- parseTypeK;
+    H.singleton (name cnstraint) . (: []) <$> parseIdentifier;
   }
 
-parseTypeExpression :: (Monad m) => ParsecT String ParserState m Node
-parseTypeExpression = do
+parseTypeParser :: (Monad m) => ParsecT String ParserState m Node -> ParsecT String ParserState m Node
+parseTypeParser p = do
+  parsed <- p
+  spaces
   _ <- string "::"
   spaces
-  cnstraints <- option M.empty parseConstraints
+  cnstraints <- option H.empty parseConstraints
   spaces
-  Expression <$> many1 (parseType cnstraints <* spaces)
+  TypeAssertion parsed cnstraints . Expression <$> many1 (parseType <* spaces)
 
 parseDeclaration :: (Monad m) => ParsecT String ParserState m TopLevel
-parseDeclaration = do
-  declFuncName <- parseIdentifier
-  spaces
-  Declaration declFuncName <$> parseTypeExpression
+parseDeclaration = (\(TypeAssertion e c t) -> Declaration e c t) <$> parseTypeParser parseIdentifier
 
 parseData :: (Monad m) => ParsecT String ParserState m TopLevel
 parseData = do
@@ -186,7 +182,7 @@ parseData = do
   dataArgs <- many (parseIdentifier <* spaces)
   _ <- char '='
   spaces
-  Data dataName dataArgs <$> parseConc M.empty `sepBy` char '|'
+  Data dataName dataArgs <$> parseConc `sepBy` char '|'
 
 parseInstance :: (Monad m) => ParsecT String ParserState m TopLevel
 parseInstance = do
@@ -196,9 +192,9 @@ parseInstance = do
   spaces
   instanceType <- parseIdentifier
   spaces
-  Instance instancingClass instanceType <$> between (char '{') (char '}') 
-    ((parseImplementation <&> uncurry M.singleton . ((\(Instance n _ _) -> name n) &&& (: []))) 
-    `chainl1` (char ';' >> return (M.unionWith (++))))
+  Instance instancingClass instanceType <$> between (char '{') (char '}')
+    ((parseImplementation <&> uncurry H.singleton . ((\(Instance n _ _) -> name n) &&& (: [])))
+    `chainl1` (char ';' >> return (H.unionWith (++))))
 
 parseClass :: (Monad m) => ParsecT String ParserState m TopLevel
 parseClass = do
@@ -206,9 +202,9 @@ parseClass = do
   spaces
   classNaming <- parseIdentifier
   spaces
-  Class classNaming <$> between (char '{') (char '}') 
-    ((parseDeclaration <&> uncurry M.singleton . ((\(Class n _) -> name n) &&& (: [])))
-    `chainl1` (char ';' >> return (M.unionWith (++))))
+  Class classNaming <$> between (char '{') (char '}')
+    ((parseDeclaration <&> uncurry H.singleton . ((\(Class n _) -> name n) &&& (: [])))
+    `chainl1` (char ';' >> return (H.unionWith (++))))
 
 parseInfix :: (Monad m) => ParsecT String ParserState m TopLevel
 parseInfix = do
@@ -219,11 +215,11 @@ parseInfix = do
   prec <- many1 digit
   spaces
   _ <- char ';'
-  updateState $ second $ M.insert (name op) ((read :: String -> Int) prec)
+  updateState $ second $ H.insert (name op) ((read :: String -> Int) prec)
   return Infix
 
 parseChoriLang :: (Monad m) => ParsecT String ParserState m [TopLevel]
 parseChoriLang = (parseImplementation <|> parseDeclaration <|> parseData <|> parseDeclaration <|> parseInstance <|> parseClass <|> parseInfix) `sepBy` spaces
 
 parser :: (Monad m) => String -> m (Either ParseError [TopLevel])
-parser = runParserT parseChoriLang (initialPos "CommandLine", M.empty) "CommandLine"
+parser = runParserT parseChoriLang (initialPos "CommandLine", H.empty) "CommandLine"
