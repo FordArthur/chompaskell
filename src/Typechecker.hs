@@ -1,126 +1,143 @@
 {-# LANGUAGE LambdaCase, TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+{-# LANGUAGE TupleSections #-}
 module Typechecker where
 
 import Parser (TopLevel(..), Node(..), AtomType(..))
-import Data.Bool
-import Control.Arrow
 import Control.Lens
 import Control.Monad.State
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as S
 
-type Constraints = [Node]
-type Identificator = Node
+maybeToEither :: a -> Maybe b -> Either a b
+maybeToEither _ (Just b) = Right b
+maybeToEither a Nothing  = Left a
+
+update :: MonadState a m => (a -> a) -> m a
+update f = modify f >> get
+
+type Identificator = (String, Int)
 
 data TypeError = TypeError -- ...
 
 data MonoType =
-    Variable    { varIdentifier :: Identificator                                                }
-  | Constructor { constructor   :: Node           , typeArgs   :: [MonoType]                    }
-  | Function    { takesType     :: MonoType       , retsType   :: MonoType  , fromClass :: Bool }
+    Variable    { varIdentifier :: Identificator , vConstraints :: S.HashSet String                }
+  | Constructor { constructor   :: Node          , typeArgs     :: [MonoType]                      }
+  | Function    { fromClass     :: Bool          , takesType    :: MonoType , retsType :: MonoType }
+  | BuiltinNat | BuiltinReal | BuiltinChar | BuiltinString
+  | Bottom -- just for convencience
   deriving (Eq)
 
 -- (Poly)Type
-data Type = Mono MonoType | Quantified MonoType (S.HashSet Type)
-  | Bottom -- Just for convenience
+data Type = Scheme { bounds :: H.HashMap String (S.HashSet String), monoBounded :: MonoType }
 
--- Checks if t1 and t2 are compatible
-(~) :: Type -> Type -> Bool
-t1 ~ t2 = undefined
+newtype Subs = Subs { _typeMap :: H.HashMap String MonoType }
 
 data TheContext =
   TheContext {
     _functionContext :: H.HashMap String Type,
     _typeContext     :: H.HashMap String [Type],
-    _classContext    :: H.HashMap String (H.HashMap String (S.HashSet (H.HashMap String Type)))
+    _classContext    :: H.HashMap String (H.HashMap String (S.HashSet (H.HashMap String Type))),
+    _typeGenerator   :: MonoType
   }
 makeLenses ''TheContext
 
-proveVar :: Node -> StateT TheContext (Either TypeError) Type
-proveVar (Atom n t _)
-  | t == Identifier || t == TypeK = do
-    fCtx <- gets _functionContext
-    unless (n `H.member` fCtx) $ lift $ Left TypeError
-    return $ H.findWithDefault Bottom n fCtx
-  | t == Int                      = undefined -- builtin
-  | t == Real'                    = undefined
-proveVar _                        = undefined
+typeMap :: Subs -> MonoType -> MonoType
+typeMap = undefined
 
-proveFunc :: Type -> [Type] -> StateT TheContext (Either TypeError) Type
-proveFunc =
-  foldM $ \fType aType -> case fType of
-    Mono (Function takeT retT _) -> bool (lift $ Left TypeError) (return . Mono $ retT) $ Mono takeT ~ aType
-    _                            -> lift $ Left TypeError
+polyMap :: Subs -> Type -> Type
+polyMap = undefined
 
-makeScopeContext :: [Node] -> H.HashMap String Type
-makeScopeContext = H.fromList . map ((name . varIdentifier) &&& Mono) . zipWith (\c (Atom _ t p) -> Variable (Atom (c:"") t p)) ['a'..'z']
+generateFrom :: MonoType -> MonoType
+generateFrom (Variable (n, i) c) = Variable (n, i + 1) c
+generateFrom _                   = undefined
 
-typeOfExpr :: Node -> StateT TheContext (Either TypeError) Type
-typeOfExpr atom@(Atom {})         = proveVar atom 
-typeOfExpr (Expression e)         = mapM typeOfExpr e >>= uncurry proveFunc . (head &&& tail)
-typeOfExpr (BinaryExpr e1 op' e2) = mapM typeOfExpr [op', e1, e2] >>= uncurry proveFunc . (head &&& tail)
-typeOfExpr (LocalBind n e) = do
-  eT <- typeOfExpr e
-  modify $ functionContext `over` H.insert (name n) eT
-  return eT
-typeOfExpr (TypeAssertion e _ t)  = do
-  eT <- typeOfExpr e
-  tT <- typeExprToType t
-  unless (eT ~ tT) $ lift $ Left TypeError
-  return eT
-typeOfExpr (ConcType {}) = undefined
+instance Semigroup Subs where
+  (<>) = compose
 
-typeExprToType :: Node -> StateT TheContext (Either TypeError) Type
+instance Monoid Subs where
+  mempty = Subs H.empty
+
+compose :: Subs -> Subs -> Subs
+compose = undefined
+
+typeExprToType :: H.HashMap String [Node]  -> Node -> Type
 typeExprToType = undefined
 
-constrToType :: Node -> Type
-constrToType = undefined
+freeInCtx :: TheContext -> H.HashMap String (S.HashSet String)
+freeInCtx = undefined
+
+unify :: MonoType -> MonoType -> StateT TheContext (Either TypeError) Subs
+unify = undefined
+
+instantiate :: Type -> StateT TheContext (Either TypeError) MonoType
+instantiate = undefined
+
+algoW :: Node -> StateT TheContext (Either TypeError) (Subs, MonoType)
+algoW (Atom name' type' _) =
+  (mempty, ) <$> case type' of
+    Identifier -> getFunc
+    Operator   -> getFunc
+    Nat        -> return BuiltinNat
+    Real'      -> return BuiltinReal 
+    Char'      -> return BuiltinChar 
+    String'    -> return BuiltinString
+    _          -> undefined
+  where getFunc = gets _functionContext
+                  >>= lift . maybeToEither TypeError . H.lookup name'
+                  >>= instantiate
+
+algoW (Expression (e:es)) = do
+  (sF, tF) <- algoW e
+  modify $ functionContext `over` H.map (polyMap sF)
+  (sAs, tAs) <- foldM (\(sA, tAs) eArg -> do {
+      (sAn, tAn) <- algoW eArg;
+      modify $ functionContext `over` H.map (polyMap sAn);
+      return (sA `compose` sAn, tAn : tAs)
+    }) (mempty, []) (reverse es)
+  beta <- _typeGenerator <$> update (typeGenerator `over` generateFrom)
+  sExpr <- unify (typeMap sAs tF) (Function False (foldl1 (Function False) tAs) beta)
+  return (sExpr `compose` sAs `compose` sF, typeMap sExpr beta)
+
+algoW (BinaryExpr lExpr op' rExpr) = algoW $ Expression [op', lExpr, rExpr]
+
+algoW (LocalBind locName' localBind') = do
+  (sB, tB) <- algoW localBind'
+  ctx <- update (functionContext `over` H.map (polyMap sB))
+  modify $ functionContext `over` H.insert (name locName') (Scheme (freeInCtx ctx) tB)
+  return (sB, typeMap sB tB)
+
+algoW (TypeAssertion {}) = undefined
+
+algoW _ = undefined
+
+typeOfExpr :: Node -> StateT TheContext (Either TypeError) MonoType
+typeOfExpr = fmap snd . algoW
 
 check :: TopLevel -> StateT TheContext (Either TypeError) TopLevel
-check bind@(VarBind vn vBind) = do
-  typeOfBind <- typeOfExpr vBind
-  bind <$ modify (functionContext `over` H.insert (name vn) typeOfBind)
+check impl@(Implementation fName fArgs bodyL) = do
+  ctx <- get
+  implType <- foldl1 (Function False) <$> mapM genBeta (fArgs ++ [fName])
+  lastSub <- foldM (\s b -> mappend s . fst <$> algoW b) mempty bodyL
+  free <- gets freeInCtx
+  put ctx
+  fSub <- case H.lookup (name fName) (_functionContext ctx) of
+    Just f -> instantiate f >>= unify (typeMap lastSub implType)
+    Nothing -> return lastSub
+  modify $ functionContext `over` H.insert (name fName) (Scheme free $ typeMap fSub implType)
+  return impl
+  where
+    genBeta :: Node -> StateT TheContext (Either TypeError) MonoType
+    genBeta n = do
+      beta <- _typeGenerator <$> update (typeGenerator `over` generateFrom)
+      modify $ functionContext `over` H.insert (name n) (Scheme H.empty beta)
+      return beta
 
-check impl@(Implementation fn args bodyV) = do
-  tCtx' <- get
-  modify $ functionContext `over` H.union (makeScopeContext args)
-  typeOfThisImpl <- foldM (\_ n -> typeOfExpr n) Bottom bodyV
-  put tCtx'
-  typeOfFunc <- gets $ H.findWithDefault typeOfThisImpl (name fn) . _functionContext
-  unless (typeOfThisImpl ~ typeOfFunc) $ void $ lift $ Left TypeError
-  impl <$ modify (over functionContext (H.insert (name fn) typeOfFunc))
+check decl@(Declaration dName cnstr dType) = do
+  modify $ functionContext `over` H.insert (name dName) (typeExprToType cnstr dType)
+  return decl
 
-check decl@(Declaration dn dConstr dType) = do
-  typeOfThisDecl <- typeExprToType dType
-  typeOfFunc <- gets $ H.findWithDefault typeOfThisDecl (name dn) . _functionContext
-  unless (typeOfThisDecl ~ typeOfFunc) $ void $ lift $ Left TypeError
-  decl <$ modify (over functionContext (H.insert (name dn) typeOfFunc))
-
-check dataD@(Data dn dArgs dConstr) = do
-  tCtx <- gets _typeContext
-  when (H.member (name dn) tCtx) $ void $ lift $ Left TypeError
-  dataD <$ modify (over functionContext (flip (foldr (\constr m' -> H.insert (name $ concName constr) (constrToType constr) m')) dConstr)
-                 . over typeContext (H.insert (name dn) (asTVar dArgs)))
-  where asTVar = undefined
-
-check instanceI@(Instance ing ied impls) = do
-  iCtx <- gets _classContext
-  case H.lookup (name ied) iCtx of
-    Just class' -> case H.lookup (name ing) class' of { Nothing -> return (); Just _ -> void $ lift $ Left TypeError }
-    Nothing     -> void $ lift $ Left TypeError
-  _ <- verifyImpls iCtx impls
-  return instanceI
-  where verifyImpls = undefined
-
-check classD@(Class cn cDecls) = do
-  cCtx <- gets _classContext
-  when (H.member (name cn) cCtx) $ void $ lift $ Left TypeError
-  classHash <- classToHash cDecls
-  classD <$ modify (over classContext (H.insert (name cn) (H.singleton "" classHash))) 
-  where classToHash = undefined
-
-check Infix = undefined
+check _ = undefined
 
 checker :: [TopLevel] -> StateT TheContext (Either TypeError) [TopLevel]
 checker = traverse check . filter (\case { Infix -> False; _ -> True })

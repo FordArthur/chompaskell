@@ -20,6 +20,16 @@
   (major1) == 4 && (major2) <  17 || \
   (major1) == 4 && (major2) == 17 && (minor) <= 2)
 #endif /* MIN_VERSION_base */
+/* package hashable-1.4.7.0 */
+#ifndef VERSION_hashable
+#define VERSION_hashable "1.4.7.0"
+#endif /* VERSION_hashable */
+#ifndef MIN_VERSION_hashable
+#define MIN_VERSION_hashable(major1,major2,minor) (\
+  (major1) <  1 || \
+  (major1) == 1 && (major2) <  4 || \
+  (major1) == 1 && (major2) == 4 && (minor) <= 7)
+#endif /* MIN_VERSION_hashable */
 /* package lens-5.3.2 */
 #ifndef VERSION_lens
 #define VERSION_lens "5.3.2"

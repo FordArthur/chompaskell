@@ -8,39 +8,39 @@ import Text.Parsec.Pos
 import qualified Data.HashMap.Strict as H
 
 data TopLevel =
-    VarBind        { varName          :: Node, varBind      :: Node                                                         }
-  | Implementation { funcName         :: Node, arguments    :: [Node], body            :: [Node]                            }
+    Implementation { funcName         :: Node, arguments    :: [Node], body            :: [Node]                            }
   | Declaration    { declName         :: Node, constraintsD    :: H.HashMap String [Node], declType     :: Node   }
   | Data           { typeName         :: Node, typeArgs     :: [Node], constructors    :: [Node]                            }
   | Instance       { instancing       :: Node, instanced    :: Node  , implementations :: H.HashMap String [TopLevel]       }
   | Class          { className        :: Node, declarations :: H.HashMap String [TopLevel]                                  }
   | Infix
 
-data AtomType = Identifier | TypeK | Operator | Int | Real' | EndOfFile
+data AtomType = Identifier | TypeK | Operator | Nat | Real' | Char' | String' | EndOfFile
   deriving (Eq, Show)
 
 data Node =
     Atom           { name       :: String, atomType    :: AtomType                         , pos         :: SourcePos }
+  | Lambda         { args       :: Node  , lamExpr     :: Node                                                        }
   | Expression     { expression :: [Node]                                                                             }
   | BinaryExpr     { leftExpr   :: Node  , oper        :: Node                             , rightExpr   :: Node      }
   | ConcType       { concName   :: Node  , consArgs    :: [Node]                                                      }
-  | TypeAssertion  { node       :: Node  , constraints :: H.HashMap String [Node], choritype :: Node        }
+  | TypeAssertion  { node       :: Node  , constraints :: H.HashMap String [Node], choritype :: Node                  }
   | LocalBind      { locName    :: Node  , localBind   :: Node                                                        }
     deriving (Eq)
 
 instance Show Node where
   show (Atom n _ _)         = n
+  show (Lambda a b)         = show "\\" ++ show a ++ " -> " ++ show b
   show (Expression [])      = undefined
-  show (Expression (e:es))  = foldl (\s n -> s ++ ' ' : show n) (show e) es
-  show (BinaryExpr le o re) = show o ++ " (" ++ show le ++ ") (" ++ show re ++ ")"
-  show (ConcType n a)       = show n ++ (foldl1 (\s s' -> s ++ ' ' : s') . map show $ a)
-  show (TypeAssertion n t c)  = show n ++ " :: " ++ show c ++ " => "++ show t
+  show (Expression (e:es))  = '(' : foldl (\s n -> s ++ ' ' : show n) (show e) es ++ ")"
+  show (BinaryExpr le o re) = '(' : show o ++ " " ++ show le ++ " " ++ show re ++ ")"
+  show (ConcType n a)       = show n ++ foldl (\s a' -> s ++ ' ' : show a') "" a
+  show (TypeAssertion n c t)  = show n ++ " :: " ++ show c ++ " => "++ show t
   show (LocalBind v b)        = "let " ++ show v ++ " = " ++ show b
 
 instance Show TopLevel where
-  show (VarBind n b)          = show n ++ " := " ++ show b
   show (Implementation f a b) = show f ++ ' ' : show a ++ " = " ++ show b
-  show (Declaration f t c)    = show f ++ " :: " ++ show c ++ " => " ++ show t
+  show (Declaration f c t)    = show f ++ " :: " ++ show c ++ " => " ++ show t
   show (Data n a c)           = show n ++ show a ++ " with constructors " ++ show c
   show (Instance i c m)       = show i ++ " for " ++ show c ++ " where " ++ show m
   show (Class c d)            = show c ++ " where " ++ show d
@@ -58,12 +58,26 @@ scanChar p = do
   modifyState $ first (if c == '\n' then (`incSourceLine` 1) . (`setSourceColumn` 0) else (`incSourceColumn` 1))
   return c
 
+parseEscapingChars :: (Monad m) => ParsecT String ParserState m Char
+parseEscapingChars = scanChar (char '\\' >> escaping) <|> scanChar anyChar
+  where escaping = oneOf "'\"\\nrtbfv" :: (Monad m) => ParsecT String ParserState m Char
+
+parseChar :: (Monad m) => ParsecT String ParserState m Node
+parseChar = do
+  pos' <- fst <$> getState
+  atomWithName Char' pos' . (: []) <$> between (char '\'') (char '\'') parseEscapingChars
+
+parseString :: (Monad m) => ParsecT String ParserState m Node
+parseString = do
+  pos' <- fst <$> getState
+  atomWithName String' pos' <$> between (char '\"') (char '\"') (many parseEscapingChars)
+
 parseNum :: (Monad m) => ParsecT String ParserState m Node
 parseNum = do
   pos' <- fst <$> getState
   int <- many1 $ scanChar digit
   dec <- option "" $ (:) <$> char '.' <*>  many1 digit
-  return $ atomWithName (if null dec then Int else Real') pos' $ int ++ dec
+  return $ atomWithName (if null dec then Nat else Real') pos' $ int ++ dec
 
 parseIdentifier :: (Monad m) => ParsecT String ParserState m Node
 parseIdentifier = do
@@ -82,8 +96,17 @@ parseOp = do
   pos' <- fst <$> getState
   atomWithName Operator pos' <$> many1 (scanChar $ oneOf "+-*/")
 
+parseLambda :: (Monad m) => ParsecT String ParserState m Node
+parseLambda = do
+  _ <- char '\\' <|> char 'λ'
+  spaces
+  lambArgs <- parseIdentifier
+  spaces
+  _ <- string "->" <?> "arrow"
+  Lambda lambArgs <$> parseValueExpression
+
 parseAtom :: (Monad m) => ParsecT String ParserState m Node
-parseAtom = parseIdentifier <|> parseTypeK <|> do { _ <- char '('; val <- parseBinaryExpression; _ <- char ')'; return val} <|> parseNum
+parseAtom = parseIdentifier <|> parseTypeK <|> between (char '(') (char ')') parseBinaryExpression <|> parseNum <|> parseChar <|> parseString
 
 parseExpression :: (Monad m) => ParsecT String ParserState m Node
 parseExpression = Expression <$> many1 (do {
@@ -125,23 +148,21 @@ parseLocalBind = do
   spaces
   _ <- char '='
   spaces
-  _ <- char ';'
   LocalBind bindedName <$> parseBinaryExpression
 
 parseValueExpression :: (Monad m) => ParsecT String ParserState m Node
-parseValueExpression = parseLocalBind <|> parseBinaryExpression
-
-parseVarBind :: (Monad m) => ParsecT String ParserState m TopLevel
-parseVarBind = (\(LocalBind n b) -> VarBind n b) <$> parseLocalBind
+parseValueExpression = parseLocalBind <|> parseBinaryExpression <|> parseLambda
 
 parseImplementation :: (Monad m) => ParsecT String ParserState m TopLevel
 parseImplementation = do
-  fName <- parseIdentifier
+  fName <- parseIdentifier <|> parseOp
   spaces
-  args <- many $ parseIdentifier <* spaces
+  fArgs <- many $ parseIdentifier <* spaces
+  _ <- char '='
+  spaces
   bodyL <- parseValueExpression `sepBy` char ','
   _ <- char ';'
-  return $ Implementation fName args bodyL
+  return $ Implementation fName fArgs bodyL
 
 parseConc :: (Monad m) => ParsecT String ParserState m Node
 parseConc = do
@@ -167,11 +188,10 @@ parseTypeParser p = do
   _ <- string "::"
   spaces
   cnstraints <- option H.empty parseConstraints
-  spaces
-  TypeAssertion parsed cnstraints . Expression <$> many1 (parseType <* spaces)
+  TypeAssertion parsed cnstraints . Expression <$> ((spaces *> parseType <* spaces) `sepBy` string "->") <* char ';'
 
 parseDeclaration :: (Monad m) => ParsecT String ParserState m TopLevel
-parseDeclaration = (\(TypeAssertion e c t) -> Declaration e c t) <$> parseTypeParser parseIdentifier
+parseDeclaration = (\(TypeAssertion e c t) -> Declaration e c t) <$> parseTypeParser (parseIdentifier <|> parseOp)
 
 parseData :: (Monad m) => ParsecT String ParserState m TopLevel
 parseData = do
@@ -218,8 +238,11 @@ parseInfix = do
   updateState $ second $ H.insert (name op) ((read :: String -> Int) prec)
   return Infix
 
+parseFunc :: (Monad m) => ParsecT String ParserState m TopLevel
+parseFunc = parseImplementation <|> parseDeclaration
+
 parseChoriLang :: (Monad m) => ParsecT String ParserState m [TopLevel]
-parseChoriLang = (parseImplementation <|> parseDeclaration <|> parseData <|> parseDeclaration <|> parseInstance <|> parseClass <|> parseInfix) `sepBy` spaces
+parseChoriLang = (parseFunc <|> parseData <|> parseDeclaration <|> parseInstance <|> parseClass <|> parseInfix) `sepBy` spaces
 
 parser :: (Monad m) => String -> m (Either ParseError [TopLevel])
 parser = runParserT parseChoriLang (initialPos "CommandLine", H.empty) "CommandLine"
