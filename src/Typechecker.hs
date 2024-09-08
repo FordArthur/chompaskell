@@ -239,11 +239,30 @@ check (Instance instancing' instanced' implementations') = do
   lift $ case H.lookup (name instancing') $ _classContext ctx of
     Just class' -> bool (Left TypeError) (Right ()) $ class' == H.keysSet implementations'
     Nothing     -> Left TypeError
-  impls <- mapM check (concatMap snd $ H.toList implementations') >>= mangle . concat
+  impls <- mapM check (concatMap snd $ H.toList implementations') >>= mapM mangle . concat
   put ctx
   modify $ instanceContext `over` H.alter (Just . \case { Just s -> S.insert (name instancing') s; Nothing -> S.singleton (name instancing');} ) (name instanced')
   return impls
-  where mangle = undefined
+  where
+    unwrapJust (Just x) = x
+    unwrapJust Nothing  = undefined
+    renameWith (Atom n k t p) n' = Atom (n++n') k t p
+    renameWith _              _  = undefined
+    stringify (Variable (s, n)  _) = s ++ show n
+    stringify (Constructor i n)    = name i ++ foldr (\n' s' -> (s' ++) . stringify $ n') "" n
+    stringify (Function _ t r)     = stringify t ++ '-' : stringify r
+    stringify rest = case rest of
+      BuiltinNat -> "Nat"
+      BuiltinChar -> "Char"
+      BuiltinReal -> "Real"
+      BuiltinString -> "String"
+      Bottom -> undefined
+    mangle :: TopLevel -> StateT TheContext (Either TypeError) TopLevel
+    mangle (Implementation fName' fArgs' bodyT') = do
+      (Scheme _ tFunc) <- gets $ unwrapJust . H.lookup (name fName') . _functionContext
+      return $ Implementation (renameWith fName' $ stringify tFunc) fArgs' bodyT'
+    mangle _ = undefined
+
 
 check (Class className' declarations') = do
   classCtx <- gets _classContext
@@ -257,8 +276,3 @@ check Infix = undefined
 
 checker :: [TopLevel] -> StateT TheContext (Either TypeError) [TopLevel]
 checker = fmap concat . traverse check . filter (\case { Infix -> False; _ -> True })
-
-{-- TODO:
- -  Rewrite: Node a -> Node
- -  Adding functions to the toplevel context as name mangling
- -}
